@@ -1,0 +1,14 @@
+{
+  "name": "sdk-log-analysis",
+  "version": "0.1.0",
+  "programs": {
+    "main": "dist/apps/main/index.js",
+    "check-input": "dist/apps/check-input/index.js",
+    "check-output": "dist/apps/check-output/index.js"
+  },
+  "requires": {
+    "tools": ["jira-log-fetch"],
+    "skills": ["sdk-log-analysis"]
+  },
+  "pi_tools": ["read", "grep", "glob"]
+}

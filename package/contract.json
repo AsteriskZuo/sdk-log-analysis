@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "input": {
+    "fields": [
+      {
+        "path": "payload.content",
+        "type": "string",
+        "required": false,
+        "desc": "上游审查通知 markdown 正文（唯一必需信息源；null/缺省属正常输入，主程序过滤）"
+      },
+      {
+        "path": "payload.mentions",
+        "type": "string[]",
+        "required": false,
+        "desc": "上游 @ 列表，本业务不消费"
+      }
+    ]
+  },
+  "output": {
+    "fields": [
+      {
+        "path": "content",
+        "type": "string",
+        "required": true,
+        "desc": "企微 markdown 正文。产出非空时必填——无日志/被过滤路径合法产出 null，由 check-output 逃生门放行"
+      },
+      {
+        "path": "mentions",
+        "type": "string[]",
+        "required": false,
+        "desc": "@ 的企微 userid 列表"
+      },
+      {
+        "path": "issue_key",
+        "type": "string",
+        "required": true,
+        "desc": "工单 key（下游与统计锚点）"
+      },
+      {
+        "path": "url",
+        "type": "string",
+        "required": true,
+        "desc": "工单链接"
+      },
+      {
+        "path": "root_cause",
+        "type": "string",
+        "required": true,
+        "desc": "一句话根因"
+      },
+      {
+        "path": "confidence",
+        "type": "string",
+        "required": true,
+        "desc": "high/medium/low"
+      },
+      {
+        "path": "mainline_status",
+        "type": "string",
+        "required": true,
+        "desc": "already-fixed/not-fixed/unknown"
+      },
+      {
+        "path": "summary",
+        "type": "string",
+        "required": true,
+        "desc": "报告摘要（markdown）"
+      }
+    ]
+  },
+  "metrics": {
+    "fields": [
+      {
+        "key": "mainline_status",
+        "type": "string",
+        "required": true,
+        "desc": "主线修复状态（平台剥离进 run_metrics）"
+      },
+      {
+        "key": "confidence",
+        "type": "string",
+        "required": true,
+        "desc": "置信度分桶"
+      },
+      {
+        "key": "skill_version",
+        "type": "string",
+        "required": false,
+        "desc": "skill 版本（取 agent-package.json version，供质量追溯）"
+      }
+    ]
+  }
+}

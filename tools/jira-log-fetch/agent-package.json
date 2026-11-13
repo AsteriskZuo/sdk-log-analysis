@@ -1,0 +1,7 @@
+{
+  "name": "jira-log-fetch",
+  "version": "0.1.0",
+  "programs": {
+    "jira-log-fetch": "dist/programs/jira-log-fetch.js"
+  }
+}
