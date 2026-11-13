@@ -4,8 +4,17 @@
   "programs": {
     "main": "dist/apps/main/index.js",
     "check-input": "dist/apps/check-input/index.js",
-    "check-output": "dist/apps/check-output/index.js"
+    "check-output": "dist/apps/check-output/index.js",
+    "warmup": "dist/apps/warmup/index.js"
   },
+  "scheduled_tasks": [
+    {
+      "name": "warmup",
+      "program": "warmup",
+      "every_minutes": 720,
+      "timeout_minutes": 60
+    }
+  ],
   "requires": {
     "tools": ["jira-log-fetch"],
     "skills": ["sdk-log-analysis"]
