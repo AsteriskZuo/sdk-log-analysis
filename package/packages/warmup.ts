@@ -236,7 +236,13 @@ export async function runWarmup(deps: WarmupDeps): Promise<WarmupResult> {
 
   const results: WarmupRepoResult[] = [];
   let failed = 0;
-  for (const entry of repos) {
+  for (const [index, entry] of repos.entries()) {
+    deps.log("info", "开始仓预热", {
+      key: entry.key,
+      repo: entry.url,
+      index: index + 1,
+      total: repos.length,
+    });
     try {
       const credentials = resolveEntryCredentials(entry, deps);
       const result = await warmupOneRepo({ git, cacheDir, entry, credentials });

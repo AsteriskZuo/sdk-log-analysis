@@ -159,6 +159,12 @@ describe("runWarmup（多仓登记表 spec §4.3：遍历登记表逐仓预热�
     expect(result.repos[0].key).toBe("ios");
     expect(result.metrics.warmup_repos_total).toBe(2);
     expect(result.metrics.warmup_repos_failed).toBe(1);
+    // 每仓开始/完成各留一条日志（进度可读：x/6 语义）
+    const startLog = logs.find(
+      (l) => l.level === "info" && l.message === "开始仓预热",
+    );
+    expect(startLog?.fields?.index).toBe(1);
+    expect(startLog?.fields?.total).toBe(2);
     expect(
       logs.some(
         (l) =>
