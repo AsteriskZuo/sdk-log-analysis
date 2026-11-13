@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@jest/globals";
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AnalysisRecordStore } from "../packages/analysis-records.js";
@@ -58,6 +58,41 @@ describe("AnalysisRecordStore（spec §6 步骤 4）", () => {
       await readFile(join(dir, "analysis-record.json"), "utf8"),
     ) as Record<string, { last_analyzed_updated?: string }>;
     expect(file["HIM-1"]?.last_analyzed_updated).toBe(UPDATED);
+  });
+
+  it("repo_key（多仓登记表 spec §4.5）：命中仓写入 repo_key；不传则无此键（可空，旧记录不回填）", async () => {
+    const { dir, store } = await makeStore();
+    await store.markAnalyzed("HIM-1", UPDATED, "linux");
+    await store.markAnalyzed("HIM-2", UPDATED, "platform_unknown");
+    await store.markAnalyzed("HIM-3", UPDATED); // 选仓之前的 skip 路径（F1/F2/无日志）
+
+    expect((await store.get("HIM-1"))?.repo_key).toBe("linux");
+    expect((await store.get("HIM-2"))?.repo_key).toBe("platform_unknown");
+    expect((await store.get("HIM-3"))?.repo_key).toBeUndefined();
+
+    const file = JSON.parse(
+      await readFile(join(dir, "analysis-record.json"), "utf8"),
+    ) as Record<string, Record<string, unknown>>;
+    expect(file["HIM-1"]?.repo_key).toBe("linux");
+    expect("repo_key" in (file["HIM-3"] ?? {})).toBe(false);
+  });
+
+  it("旧记录（无 repo_key）读取兼容：去重判断不受影响", async () => {
+    const { dir, store } = await makeStore();
+    // 模拟旧版写入的记录形状（无 repo_key 字段）
+    await writeFile(
+      join(dir, "analysis-record.json"),
+      JSON.stringify({
+        "HIM-1": {
+          last_analyzed_updated: UPDATED,
+          analyzed_at: "2026-11-12T02:00:00.000Z",
+        },
+      }),
+      "utf8",
+    );
+
+    await expect(store.shouldSkip("HIM-1", UPDATED)).resolves.toBe(true);
+    expect((await store.get("HIM-1"))?.repo_key).toBeUndefined();
   });
 
   it("原子写：temp + rename，写完后目录无 .tmp 残留", async () => {

@@ -35,6 +35,22 @@ function makeArgs(overrides: Record<string, unknown> = {}) {
 }
 
 describe("buildAnalysisNotifyMessage（spec §6.10）", () => {
+  it("命中仓 key 标注（多仓登记表 spec §4.3）：标题行追加 [key]；缺省不标注", async () => {
+    const lookup = async () => undefined;
+    const tagged = await buildAnalysisNotifyMessage(
+      makeArgs({ repoKey: "linux" }),
+      lookup,
+    );
+    expect(tagged.content.split("\n")[0]).toBe(
+      "**SDK 日志分析报告：HIM-24204 [linux]**",
+    );
+
+    const untagged = await buildAnalysisNotifyMessage(makeArgs(), lookup);
+    expect(untagged.content.split("\n")[0]).toBe(
+      "**SDK 日志分析报告：HIM-24204**",
+    );
+  });
+
   it("映射表命中 → mentions 带 userid，content 形状完整", async () => {
     const message = await buildAnalysisNotifyMessage(makeArgs(), async () => ({
       wecomUserid: "ZhangSan",

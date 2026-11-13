@@ -7,7 +7,7 @@
  * 输入快照已是工具脱敏产物，本模块原样排版、不再二次脱敏。
  *
  * task-context.md：工单 key、问题时间窗（若叙述中有）、日志文件清单（路径+大小）、
- * 选中 ref 与 provenance、审计 ref（config.mainline_ref，默认 msync）。
+ * 选中 ref 与 provenance、审计 ref（命中登记表条目的 mainline_ref）。
  * 纪律：不内联日志原文进 prompt——模型自行读文件（spec §6.8）。
  */
 

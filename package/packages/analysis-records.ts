@@ -15,6 +15,12 @@ import { sdk } from "@asteriskzuo/agent-sdk";
 export type AnalysisRecord = {
   /** 分析时实时工单的 updated 时间戳；分析时 updated 缺失则无此键（该记录不参与去重） */
   last_analyzed_updated?: string;
+  /**
+   * 本次分析命中的仓 key（多仓登记表 spec §4.5；platform_unknown 分支记
+   * "platform_unknown"）。选仓之前的 skip 路径（F1/F2/无日志）与旧记录无此字段，
+   * 读口一律按可空处理，旧记录不回填
+   */
+  repo_key?: string;
   /** 本次记录写入时间（ISO），供控制台/日志排查 */
   analyzed_at: string;
 };
@@ -50,16 +56,19 @@ export class AnalysisRecordStore {
     return record?.last_analyzed_updated === liveUpdated;
   }
 
-  /** 写分析记录（分析完成 / 自持过滤命中 / 无日志分支共用同一去重锚点） */
+  /** 写分析记录（分析完成 / 自持过滤命中 / 无日志分支共用同一去重锚点）。
+   *  repoKey：本次命中的仓 key（含 platform_unknown）；选仓之前的 skip 路径不传 */
   async markAnalyzed(
     issueKey: string,
     liveUpdated: string | undefined,
+    repoKey?: string,
   ): Promise<void> {
     const analyzedAt = new Date().toISOString();
     return this.withWriteLock(async () => {
       const data = await this.readAll();
       data[issueKey] = {
         ...(liveUpdated ? { last_analyzed_updated: liveUpdated } : {}),
+        ...(repoKey ? { repo_key: repoKey } : {}),
         analyzed_at: analyzedAt,
       };
       await this.writeAll(data);

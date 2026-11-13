@@ -6,6 +6,8 @@
  * 映射表命中 → userid；未命中 → 拼音全拼兜底（guessed，消息带提示行）；
  * 仍无 → 提示行 + mentions 空。
  * 通知渠道只有企业微信；不写 Jira comments（spec §2 决策 D7）。
+ * 多仓登记表 spec §4.3：标题行追加命中仓 key 标注（如 [linux]），方便接收人
+ * 判断结论归属；platform_unknown 通知模板见 repo-select.ts。
  */
 
 import {
@@ -59,10 +61,12 @@ export async function buildAnalysisNotifyMessage(
     report: AnalysisReport;
     audit: MainlineAuditResult;
     identity?: AnalysisIdentity;
+    /** 命中登记表条目 key（多仓登记表 spec §4.3）：标题行追加 [key] 标注；缺省不标注 */
+    repoKey?: string;
   },
   lookupWeComAccount: LookupFn = defaultLookupWeComAccount,
 ): Promise<NotifyMessage> {
-  const { issueKey, url, report, audit, identity } = args;
+  const { issueKey, url, report, audit, identity, repoKey } = args;
 
   const wecomAccount = await lookupWeComAccount({
     emailAddress: identity?.assigneeEmail,
@@ -70,7 +74,7 @@ export async function buildAnalysisNotifyMessage(
   });
 
   const lines: string[] = [
-    `**SDK 日志分析报告：${issueKey}**`,
+    `**SDK 日志分析报告：${issueKey}${repoKey ? ` [${repoKey}]` : ""}**`,
     "",
     `> 工单：[${issueKey}](${url})`,
     `> 根因：${report.root_cause}`,

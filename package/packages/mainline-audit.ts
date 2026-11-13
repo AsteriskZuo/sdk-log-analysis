@@ -132,11 +132,11 @@ function unknownResult(summary: string): MainlineAuditResult {
  */
 export async function runMainlineAudit(args: {
   workspace: string;
-  /** config.sdk_repo_url（编排注入；bare 缓存仓的唯一 origin） */
+  /** 命中登记表条目的 url（编排注入；bare 缓存仓的唯一 origin） */
   sdkRepoUrl: string;
   /** 业务缓存根目录（编排注入 sdk.cacheDir()；bare 仓定位 {cacheDir}/repos/{slug}） */
   cacheDir: string;
-  /** config.mainline_ref，缺省调用方已归一为 "msync" */
+  /** 命中登记表条目的 mainline_ref（编排注入，无 env 缺省值路径） */
   mainlineRef: string;
   issueKey: string;
   report: AnalysisReport;

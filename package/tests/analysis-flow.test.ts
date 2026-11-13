@@ -7,6 +7,8 @@ import {
   type AnalysisFlowDeps,
 } from "../packages/analysis-flow.js";
 import { AnalysisRecordStore } from "../packages/analysis-records.js";
+import { PLATFORM_UNKNOWN_KEY } from "../packages/repo-select.js";
+import type { RepoRegistry } from "../packages/repos.js";
 import type { GitRunResult, GitRunner } from "../packages/worktree.js";
 
 const UPDATED = "2026-11-12T10:00:00.000+0800";
@@ -14,6 +16,23 @@ const SHA = "a".repeat(40);
 
 const REPO_URL = "https://github.com/easemob/emclient-linux";
 const REPO_SLUG = "github.com-easemob-emclient-linux";
+const IOS_URL = "https://github.com/easemob/emclient-ios";
+const IOS_SLUG = "github.com-easemob-emclient-ios";
+
+/** 默认登记表 fixture：单 linux 仓（默认工单标题/日志内容命中 emclient 关键词） */
+const REGISTRY: RepoRegistry = {
+  version: 1,
+  repos: [
+    {
+      key: "linux",
+      url: REPO_URL,
+      mainline_ref: "msync",
+      assignee_tag: "sdk",
+      match: ["linux", "emclient"],
+      notes: "C++ 核心仓",
+    },
+  ],
+};
 
 const PASS_CONTENT = [
   "**工单审查通过 ✅**",
@@ -113,18 +132,24 @@ function fakeGitAllOk(): { git: GitRunner; calls: string[][] } {
 
 type DepsOverrides = Partial<AnalysisFlowDeps>;
 
-async function makeDeps(overrides: DepsOverrides = {}) {
+async function makeDeps(
+  overrides: DepsOverrides = {},
+  opts: { warmSlugs?: string[] } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "analysis-flow-"));
   const workspace = join(root, "workspace");
   const dataDir = join(root, "data");
   const cacheDir = join(root, "cache");
   // 预建暖仓 bare 缓存目录（{cacheDir}/repos/{slug}）：跳过首克隆，走本地解析路径
-  await mkdir(join(cacheDir, "repos", REPO_SLUG), { recursive: true });
-  // 工具落盘模拟：input/logs/app.log（ref 选择会读 core version 行；材料化读同目录）
+  for (const slug of [REPO_SLUG, ...(opts.warmSlugs ?? [])]) {
+    await mkdir(join(cacheDir, "repos", slug), { recursive: true });
+  }
+  // 工具落盘模拟：input/logs/app.log（ref 选择会读 core version 行；材料化读同目录；
+  // 内容含 emclient 关键词，选仓语料命中 linux 仓）
   await mkdir(join(workspace, "input", "logs"), { recursive: true });
   await writeFile(
     join(workspace, "input", "logs", "app.log"),
-    "init done\n",
+    "emclient init done\n",
     "utf8",
   );
 
@@ -143,8 +168,8 @@ async function makeDeps(overrides: DepsOverrides = {}) {
     })),
     config: () => ({
       jira_url: "https://j1.private.easemob.com",
-      sdk_repo_url: REPO_URL,
     }),
+    loadRegistry: () => REGISTRY,
     secret: (name: string) => `secret-${name}`,
     log: () => undefined,
     workspace,
@@ -299,14 +324,21 @@ describe("自持过滤（§4.3：F1/F2/F3）", () => {
     expect(deps.agent).not.toHaveBeenCalled();
   });
 
-  it("F3：assignee_tag 从 config 取（覆盖缺省 sdk）", async () => {
+  it("F3：assignee_tag 取自命中登记表条目（非 sdk 标签同样生效）", async () => {
     const { deps } = await makeDeps({
       lookupPersonTags: async () => ["backend"],
-    });
-    deps.config = () => ({
-      jira_url: "https://j1.private.easemob.com",
-      sdk_repo_url: REPO_URL,
-      assignee_tag: "backend",
+      loadRegistry: () => ({
+        version: 1,
+        repos: [
+          {
+            key: "linux",
+            url: REPO_URL,
+            mainline_ref: "msync",
+            assignee_tag: "backend",
+            match: ["emclient"],
+          },
+        ],
+      }),
     });
 
     const outcome = await runAnalysisFlow(
@@ -314,7 +346,7 @@ describe("自持过滤（§4.3：F1/F2/F3）", () => {
       deps,
     );
 
-    // 自定义标签命中 → 不被 F3 拦截，走完全流程
+    // 条目标签命中 → 不被 F3 拦截，走完全流程
     expect(outcome.type).toBe("return");
     expect(outcome.type === "return" && outcome.value !== null).toBe(true);
   });
@@ -525,10 +557,17 @@ describe("失败路径", () => {
     }) as unknown as GitRunner;
     const log = jest.fn(() => undefined);
     const { deps } = await makeDeps({ git, log });
-    deps.config = () => ({
-      jira_url: "https://j1.private.easemob.com",
-      sdk_repo_url: REPO_URL,
-      mainline_ref: "SDK_4.19.1", // 与选中 ref 相同
+    deps.loadRegistry = () => ({
+      version: 1,
+      repos: [
+        {
+          key: "linux",
+          url: REPO_URL,
+          mainline_ref: "SDK_4.19.1", // 与选中 ref 相同
+          assignee_tag: "sdk",
+          match: ["emclient"],
+        },
+      ],
     });
 
     const outcome = await runAnalysisFlow(
@@ -696,10 +735,12 @@ describe("失败路径", () => {
   });
 });
 
-describe("源码仓配置与凭据（§6.6/D11，key 按账号）", () => {
-  it("缺 config.sdk_repo_url → fail（可行动错误，不执行 git 不调 agent）", async () => {
+describe("仓库登记表与凭据（多仓登记表 spec §4.1/§4.2；凭据 §6.6/D11）", () => {
+  it("登记表加载失败（必要输入缺失）→ fail（不执行 git 不调 agent）", async () => {
     const { deps, gitCalls } = await makeDeps({
-      config: () => ({ jira_url: "https://j1.private.easemob.com" }),
+      loadRegistry: () => {
+        throw new Error("仓库登记表读取失败：/x/repos.json");
+      },
     });
 
     const outcome = await runAnalysisFlow(
@@ -709,17 +750,27 @@ describe("源码仓配置与凭据（§6.6/D11，key 按账号）", () => {
 
     expect(outcome.type).toBe("fail");
     if (outcome.type === "fail") {
-      expect(outcome.reason).toContain("sdk_repo_url");
+      expect(outcome.reason).toContain("仓库登记表读取失败");
     }
     expect(gitCalls).toEqual([]);
     expect(deps.agent).not.toHaveBeenCalled();
   });
 
-  it("sdk_repo_url 非 http(s) URL → fail", async () => {
-    const { deps, gitCalls } = await makeDeps({
-      config: () => ({
-        jira_url: "https://j1.private.easemob.com",
-        sdk_repo_url: "/local/path/to/repo",
+  it("选仓无命中 → platform_unknown：企微通知 + run success，不执行 git 不调 agent，记录 repo_key", async () => {
+    const log = jest.fn(() => undefined);
+    const { deps, store, gitCalls } = await makeDeps({
+      log,
+      loadRegistry: () => ({
+        version: 1,
+        repos: [
+          {
+            key: "linux",
+            url: REPO_URL,
+            mainline_ref: "msync",
+            assignee_tag: "sdk",
+            match: ["zzz-no-hit"],
+          },
+        ],
       }),
     });
 
@@ -728,11 +779,82 @@ describe("源码仓配置与凭据（§6.6/D11，key 按账号）", () => {
       deps,
     );
 
-    expect(outcome.type).toBe("fail");
-    if (outcome.type === "fail") {
-      expect(outcome.reason).toContain("http(s)");
-    }
+    expect(outcome.type).toBe("return");
+    const value = (
+      outcome as { type: "return"; value: Record<string, unknown> }
+    ).value;
+    // 通知内容：无法识别平台 + 工单链接 + 日志头部摘要
+    expect(value.content).toContain("无法识别平台，未分析");
+    expect(value.content).toContain(PLATFORM_UNKNOWN_KEY);
+    expect(value.content).toContain("emclient init done");
+    // 产出满足 check-output 契约必填字段（产出非空即全字段校验）
+    expect(value.issue_key).toBe("HIM-1");
+    expect(value.url).toBe("https://j1.private.easemob.com/browse/HIM-1");
+    expect(value.repo_key).toBe(PLATFORM_UNKNOWN_KEY);
+    expect(value.mainline_status).toBe("unknown");
+    expect(value.metrics).toEqual({
+      mainline_status: "unknown",
+      confidence: "low",
+    });
+    // 不准备 worktree、不调模型
     expect(gitCalls).toEqual([]);
+    expect(deps.agent).not.toHaveBeenCalled();
+    // 与「模型判定 skip」同地位：写去重记录（repo_key 记 platform_unknown）
+    const record = await store.get("HIM-1");
+    expect(record?.last_analyzed_updated).toBe(UPDATED);
+    expect(record?.repo_key).toBe(PLATFORM_UNKNOWN_KEY);
+    expect(log).toHaveBeenCalledWith(
+      "info",
+      "选仓无命中：无法识别平台，未分析（配置缺口信号）",
+      { issueKey: "HIM-1", repoKey: PLATFORM_UNKNOWN_KEY },
+    );
+  });
+
+  it("多仓登记表：标题命中 ios（顺序优先于日志里的 linux 词），用条目 url/mainline_ref 准备仓", async () => {
+    const { deps, store, gitCalls } = await makeDeps(
+      {
+        run: jest.fn(async () =>
+          fetchOutput({ issue: { summary: "iOS 端登录后重连丢会话" } }),
+        ),
+        loadRegistry: () => ({
+          version: 1,
+          repos: [
+            {
+              key: "ios",
+              url: IOS_URL,
+              mainline_ref: "chatsdk",
+              assignee_tag: "sdk",
+              match: ["ios"],
+            },
+            ...REGISTRY.repos,
+          ],
+        }),
+      },
+      { warmSlugs: [IOS_SLUG] },
+    );
+
+    const outcome = await runAnalysisFlow(
+      envelope({ content: PASS_CONTENT }),
+      deps,
+    );
+
+    expect(outcome.type).toBe("return");
+    const value = (
+      outcome as { type: "return"; value: Record<string, unknown> }
+    ).value;
+    expect(value.repo_key).toBe("ios");
+    // 通知标题带命中仓标注
+    expect(value.content).toContain("**SDK 日志分析报告：HIM-1 [ios]**");
+    // worktree/审计全部走 ios 仓（slug 目录），linux 缓存目录不被触碰
+    expect(
+      gitCalls.some((args) => args.some((a) => a.includes(IOS_SLUG))),
+    ).toBe(true);
+    expect(
+      gitCalls.some((args) => args.some((a) => a.includes(REPO_SLUG))),
+    ).toBe(false);
+    // 审计检出条目 mainline_ref（chatsdk 而非 linux 的 msync）
+    expect(gitCalls.some((args) => args.includes("chatsdk"))).toBe(true);
+    expect((await store.get("HIM-1"))?.repo_key).toBe("ios");
   });
 
   /** 触发一次 fetch 的 fake git（主 worktree 本地解析失败 → 锁内 fetch → 命中；审计 worktree 直接命中） */
@@ -759,14 +881,22 @@ describe("源码仓配置与凭据（§6.6/D11，key 按账号）", () => {
     return { git, calls };
   }
 
-  it("配 sdk_repo_account 且两个 secrets 齐备 → fetch 带 http.extraHeader（凭据不进 URL）", async () => {
+  it("条目配 account 且两个 secrets 齐备 → fetch 带 http.extraHeader（凭据不进 URL）", async () => {
     const { git, calls } = fakeGitWithFetch();
     const { deps } = await makeDeps({
       git,
-      config: () => ({
-        jira_url: "https://j1.private.easemob.com",
-        sdk_repo_url: REPO_URL,
-        sdk_repo_account: "ci-bot",
+      loadRegistry: () => ({
+        version: 1,
+        repos: [
+          {
+            key: "linux",
+            url: REPO_URL,
+            mainline_ref: "msync",
+            assignee_tag: "sdk",
+            account: "ci-bot",
+            match: ["emclient"],
+          },
+        ],
       }),
     });
 
@@ -795,10 +925,18 @@ describe("源码仓配置与凭据（§6.6/D11，key 按账号）", () => {
     const { deps } = await makeDeps({
       git,
       log,
-      config: () => ({
-        jira_url: "https://j1.private.easemob.com",
-        sdk_repo_url: REPO_URL,
-        sdk_repo_account: "ci-bot",
+      loadRegistry: () => ({
+        version: 1,
+        repos: [
+          {
+            key: "linux",
+            url: REPO_URL,
+            mainline_ref: "msync",
+            assignee_tag: "sdk",
+            account: "ci-bot",
+            match: ["emclient"],
+          },
+        ],
       }),
       secret: (name: string) => {
         if (name === "git_account_ci-bot_token") {
@@ -850,7 +988,8 @@ describe("正常路径", () => {
     expect(value.mainline_status).toBe("not-fixed");
     expect(value.summary).toBe("报告摘要");
     expect(typeof value.content).toBe("string");
-    expect(value.content).toContain("**SDK 日志分析报告：HIM-1**");
+    expect(value.content).toContain("**SDK 日志分析报告：HIM-1 [linux]**");
+    expect(value.repo_key).toBe("linux");
     expect(value.mentions).toEqual(["ZhangSan"]);
     expect(value.metrics).toEqual({
       mainline_status: "not-fixed",
@@ -863,9 +1002,18 @@ describe("正常路径", () => {
       (call) => (call[0] as { mode?: string }).mode,
     );
     expect(callModes).toEqual(["fresh", "fresh"]);
+    // 分析提示词注入命中条目信息（仓 key/url + notes 背景）
+    const analysisInput = String(
+      (agent.mock.calls[0] as [{ input: unknown }])[0].input,
+    );
+    expect(analysisInput).toContain("`linux`");
+    expect(analysisInput).toContain(REPO_URL);
+    expect(analysisInput).toContain("C++ 核心仓");
 
-    // 分析完成写去重记录（幂等锚点 = 实时 updated）
-    expect((await store.get("HIM-1"))?.last_analyzed_updated).toBe(UPDATED);
+    // 分析完成写去重记录（幂等锚点 = 实时 updated + 命中仓 key）
+    const record = await store.get("HIM-1");
+    expect(record?.last_analyzed_updated).toBe(UPDATED);
+    expect(record?.repo_key).toBe("linux");
 
     // 材料化落盘（§6.7）
     const conversation = await readFile(

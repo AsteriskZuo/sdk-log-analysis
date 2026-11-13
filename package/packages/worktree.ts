@@ -261,7 +261,7 @@ async function verifyCommit(
  * 任何一步最终失败抛 Error（ref + 脱敏 git 错误摘要），由编排映射 sdk.fail。
  */
 export async function prepareWorktree(args: {
-  /** 源码仓远端 URL（config.sdk_repo_url；缓存仓唯一 origin） */
+  /** 源码仓远端 URL（命中登记表条目的 url；缓存仓唯一 origin） */
   repoUrl: string;
   /** 业务缓存根目录（sdk.cacheDir()；bare 仓落在 {cacheDir}/repos/{slug}） */
   cacheDir: string;

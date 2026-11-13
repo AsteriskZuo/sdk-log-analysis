@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "repos": [
+    {
+      "key": "ios",
+      "url": "https://github.com/easemob/emclient-ios",
+      "mainline_ref": "chatsdk",
+      "assignee_tag": "sdk",
+      "match": ["ios", "iphone", "ipad"]
+    },
+    {
+      "key": "android",
+      "url": "https://github.com/easemob/emclient-android",
+      "mainline_ref": "chatsdk",
+      "assignee_tag": "sdk",
+      "match": ["android", "安卓"]
+    },
+    {
+      "key": "harmony",
+      "url": "https://github.com/easemob/emclient_harmony",
+      "mainline_ref": "dev",
+      "assignee_tag": "sdk",
+      "match": ["harmony", "harmonyos", "鸿蒙"]
+    },
+    {
+      "key": "flutter",
+      "url": "https://github.com/easemob/im_flutter_sdk",
+      "mainline_ref": "flutter2_stable",
+      "assignee_tag": "sdk",
+      "match": ["flutter", "dart"]
+    },
+    {
+      "key": "react-native",
+      "url": "https://github.com/easemob/react-native-chat-sdk",
+      "mainline_ref": "dev",
+      "assignee_tag": "sdk",
+      "match": ["react-native", "reactnative", "react native"]
+    },
+    {
+      "key": "linux",
+      "url": "https://github.com/easemob/emclient-linux",
+      "mainline_ref": "msync",
+      "assignee_tag": "sdk",
+      "match": ["linux", "emclient", "native sdk"],
+      "notes": "iOS/Android/HarmonyOS 共享 C++ 核心，双端一致行为根因常在此"
+    }
+  ]
+}

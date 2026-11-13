@@ -1,8 +1,13 @@
 /**
  * SDK 日志分析主编排（spec §6 步骤 1–11 全序）：
- * 输入过滤 → 拉取工单与日志（jira-log-fetch）→ 自持过滤 F1/F2/F3 → 去重 →
- * 无日志分支 → ref 选择 → worktree 准备 → 材料化 → 大模型分析（链式兜底）→
- * mainline 审计（降级不 fail）→ 组装输出 + 写去重记录。
+ * 输入过滤 → 拉取工单与日志（jira-log-fetch）→ 自持过滤 F1/F2 → 去重 →
+ * 无日志分支 → 选仓（仓库登记表关键词匹配，无命中走 platform_unknown 通知分支）→
+ * F3 负责人标签过滤（标签取自命中条目）→ ref 选择 → worktree 准备 → 材料化 →
+ * 大模型分析（链式兜底）→ mainline 审计（降级不 fail）→ 组装输出 + 写去重记录。
+ *
+ * 仓 URL / mainline_ref / assignee_tag / account 全部来自命中登记表条目
+ * （多仓登记表 spec docs/specs/2026-11-13-sdk-repo-registry-spec.md；
+ * env 四 key sdk_repo_url/mainline_ref/assignee_tag/sdk_repo_account 已删除）。
  *
  * sdk 边界全部经 deps 注入（生产 = 真 sdk，测试 = mock）；流程不直接
  * 调 sdk.return/sdk.fail，而是返回 FlowOutcome 由 main 映射。
@@ -10,6 +15,7 @@
  *
  * 日志纪律（spec §6）：每个关键节点一条 deps.log——过滤原因（含解析出的字段值）、
  * 工单拉取结果（附件选中/跳过清单）、自持过滤命中项（F1/F2/F3 哪个）、去重命中、
+ * 选仓结果（命中条目 key 与命中关键词 / platform_unknown）、
  * ref 选择结果与依据、worktree 路径与 commit、大模型原始输出（完整文本，第一现场）、
  * 报告解析结果、审计结论、通知组装结果。
  */
@@ -34,6 +40,19 @@ import {
   type WeComAccount,
 } from "./person-mapping.js";
 import { parseAnalysisReport, type AnalysisReport } from "./report-parse.js";
+import {
+  buildPlatformUnknownNotifyMessage,
+  buildSelectCorpus,
+  NOTIFY_LOG_HEAD_BYTES,
+  PLATFORM_UNKNOWN_KEY,
+  readFileHead,
+  selectRepo,
+} from "./repo-select.js";
+import {
+  loadRepoRegistry,
+  type RepoEntry,
+  type RepoRegistry,
+} from "./repos.js";
 import { resolveRef } from "./ref-resolver.js";
 import {
   prepareWorktree,
@@ -44,10 +63,6 @@ import {
 
 /** jira 终态工单的 statusCategory 值（与审查业务同一 jira 实例语义） */
 const TERMINAL_STATUS_CATEGORY = "Complete";
-/** F3 过滤标签缺省值（spec §10：config.assignee_tag 缺省 sdk） */
-const DEFAULT_ASSIGNEE_TAG = "sdk";
-/** 主线审计 ref 缺省值（spec §6.7/§10） */
-const DEFAULT_MAINLINE_REF = "msync";
 /** 分析 skill 名（须在本业务绑定的 skill 集合内） */
 const ANALYSIS_SKILL = "sdk-log-analysis";
 
@@ -96,6 +111,11 @@ export type AnalysisFlowDeps = {
   cacheDir: () => string;
   /** 缺省 new AnalysisRecordStore()（落点 sdk.dataDir()）；测试传临时目录实例 */
   store?: AnalysisRecordStore;
+  /**
+   * 仓库登记表加载口（缺省 = repos.ts 的 loadRepoRegistry，锚定包根 repos.json）；
+   * 加载失败抛错 → 编排映射 fail（登记表是业务运行的必要输入）。测试注入 fixture。
+   */
+  loadRegistry?: () => RepoRegistry;
   lookupPersonTags?: (user: {
     emailAddress?: string;
     name?: string;
@@ -155,10 +175,15 @@ function buildNarrative(issue: Record<string, unknown>): string {
     .join("\n");
 }
 
-/** agent input 拼装（spec §6.8；不内联日志原文，模型自行读文件） */
-function buildAnalysisAgentInput(issueKey: string): string {
+/** agent input 拼装（spec §6.8；不内联日志原文，模型自行读文件）。
+ *  命中条目的 notes（仓背景知识）随提示词注入（多仓登记表 spec §4.1/§4.2-4）。 */
+function buildAnalysisAgentInput(issueKey: string, repo: RepoEntry): string {
+  const notesSection = repo.notes ? `\n\n## 仓库背景\n${repo.notes}` : "";
   return `## 任务
 分析 Jira 工单 ${issueKey} 的 SDK 日志，给出根因结论。
+
+## 源码仓
+本次分析命中登记表仓 \`${repo.key}\`（${repo.url}），source/ 即该仓对应版本源码。${notesSection}
 
 ## 工作区文件（相对路径，自行读取）
 - task-context.md：任务事实（工单、日志清单、源码版本）
@@ -363,30 +388,6 @@ export async function runAnalysisFlow(
     return { type: "return", value: null };
   }
 
-  // F3：负责人无 sdk 标签不分析（v2 CATEGORY_SUBSCRIPTION_TAG 平移）；
-  // identity 无 assignee / 映射查不到记录 → 视为无标签跳过（v2 同款语义）
-  const assigneeTag = config.assignee_tag ?? DEFAULT_ASSIGNEE_TAG;
-  const hasAssignee = Boolean(
-    identity?.assigneeEmail || identity?.assigneeName,
-  );
-  const tags = hasAssignee
-    ? await lookupPersonTags({
-        emailAddress: identity?.assigneeEmail,
-        name: identity?.assigneeName,
-      })
-    : [];
-  deps.log("info", "负责人标签查询完成", { issueKey, assigneeTag, tags });
-  if (!tags.includes(assigneeTag)) {
-    await store.markAnalyzed(issueKey, liveUpdated);
-    deps.log("info", "F3 负责人无订阅标签，跳过分析", {
-      issueKey,
-      assigneeTag,
-      hasAssignee,
-      tags,
-    });
-    return { type: "return", value: null };
-  }
-
   // 4. 去重：实时 updated 与记录相同 → 跳过；updated 缺失 → 不去重 + warn
   if (!liveUpdated) {
     deps.log("warn", "实时工单缺 updated，本次不去重（每次都分析）", {
@@ -407,11 +408,114 @@ export async function runAnalysisFlow(
     return { type: "return", value: null };
   }
 
-  // 6. SDK 源码 ref 选择（§6.5）：歧义无法消解 → fail（消息带候选列表，可行动失败）
-  const narrative = buildNarrative(issue);
+  // 5.5 选仓（多仓登记表 spec §4.2，决策 D3/D7/D8）：加载登记表 → 语料（工单标题 +
+  // 各日志附件前 64KB）关键词匹配。登记表加载失败 = 必要输入缺失 → fail；
+  // 无命中 = platform_unknown 分支（企微通知 + run success），不准备 worktree 不调模型
   const logFiles = logs.map((item) =>
     path.join(deps.workspace, "input", "logs", item.file),
   );
+  const jiraIssueUrl = `${jiraUrl.replace(/\/+$/, "")}/browse/${issueKey}`;
+  // 登记表加载（必要输入缺失/非法）与语料直读（日志缺失属异常输入）失败 → fail
+  let selected: RepoEntry | undefined;
+  try {
+    const registry = (deps.loadRegistry ?? loadRepoRegistry)();
+    const corpus = buildSelectCorpus({
+      ...(typeof issue.summary === "string" && issue.summary !== ""
+        ? { title: issue.summary }
+        : {}),
+      logFiles,
+    });
+    const selection = selectRepo({ corpus, registry });
+    if (selection.ok) {
+      selected = selection.entry;
+      deps.log("info", "选仓命中", {
+        issueKey,
+        repoKey: selected.key,
+        matchedKeyword: selection.matchedKeyword,
+        repoUrl: selected.url,
+        mainlineRef: selected.mainline_ref,
+        assigneeTag: selected.assignee_tag,
+      });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    deps.log("error", "仓库登记表加载/选仓失败", {
+      issueKey,
+      errorMessage: message,
+    });
+    return {
+      type: "fail",
+      reason: `工单 ${issueKey} 分析失败：${message}`,
+    };
+  }
+
+  // platform_unknown 分支（§4.2-3）：不准备 worktree、不调模型，企微通知
+  // 「无法识别平台」（含 issue_key 与日志头部摘要，方便人工补充 match 词）后
+  // run success——与「模型判定 skip」同地位（写去重记录），但平台未知是配置缺口
+  // 信号，要通知人。企微通知经产出 content 由平台出口投递；产出非空须满足
+  // check-output 契约（§4.5 契约不变），root_cause/confidence/mainline_status/
+  // summary 按「未分析」语义填诚实占位值（metrics 同），repo_key 为附加标注
+  // （契约不声明不校验）
+  if (!selected) {
+    const message = buildPlatformUnknownNotifyMessage({
+      issueKey,
+      url: jiraIssueUrl,
+      logHead: readFileHead(logFiles[0], NOTIFY_LOG_HEAD_BYTES),
+    });
+    await store.markAnalyzed(issueKey, liveUpdated, PLATFORM_UNKNOWN_KEY);
+    deps.log("info", "选仓无命中：无法识别平台，未分析（配置缺口信号）", {
+      issueKey,
+      repoKey: PLATFORM_UNKNOWN_KEY,
+    });
+    return {
+      type: "return",
+      value: {
+        ...message,
+        issue_key: issueKey,
+        url: jiraIssueUrl,
+        repo_key: PLATFORM_UNKNOWN_KEY,
+        root_cause: "未分析：无法识别平台",
+        confidence: "low",
+        mainline_status: "unknown",
+        summary:
+          "未执行分析：工单标题与日志前 64KB 未命中仓库登记表任何选仓关键词，请人工补充登记表 match 词后重推。",
+        metrics: { mainline_status: "unknown", confidence: "low" },
+      },
+    };
+  }
+
+  // F3：负责人无该仓订阅标签不分析（v2 CATEGORY_SUBSCRIPTION_TAG 平移）；标签取自
+  // 命中条目 assignee_tag（不再有 env 缺省值路径）。identity 无 assignee /
+  // 映射查不到记录 → 视为无标签跳过（v2 同款语义）
+  const assigneeTag = selected.assignee_tag;
+  const hasAssignee = Boolean(
+    identity?.assigneeEmail || identity?.assigneeName,
+  );
+  const tags = hasAssignee
+    ? await lookupPersonTags({
+        emailAddress: identity?.assigneeEmail,
+        name: identity?.assigneeName,
+      })
+    : [];
+  deps.log("info", "负责人标签查询完成", {
+    issueKey,
+    repoKey: selected.key,
+    assigneeTag,
+    tags,
+  });
+  if (!tags.includes(assigneeTag)) {
+    await store.markAnalyzed(issueKey, liveUpdated, selected.key);
+    deps.log("info", "F3 负责人无订阅标签，跳过分析", {
+      issueKey,
+      assigneeTag,
+      hasAssignee,
+      tags,
+    });
+    return { type: "return", value: null };
+  }
+
+  // 6. SDK 源码 ref 选择（§6.5）：歧义无法消解 → fail（消息带候选列表，可行动失败）
+  const narrative = buildNarrative(issue);
   const versions = Array.isArray(issue.versions)
     ? issue.versions.filter(
         (item): item is string => typeof item === "string" && item !== "",
@@ -438,24 +542,12 @@ export async function runAnalysisFlow(
   });
 
   // 7. worktree 准备（§6.6：远端 URL + bare 缓存）：ref 解析/检出失败 → 回退主线重试（§6.5）
-  const sdkRepoUrl = config.sdk_repo_url ?? "";
-  if (!/^https?:\/\//.test(sdkRepoUrl)) {
-    deps.log(
-      "error",
-      "config.sdk_repo_url 缺失或非 http(s) URL，无法准备源码 worktree",
-      {
-        issueKey,
-      },
-    );
-    return {
-      type: "fail",
-      reason: `工单 ${issueKey} 分析失败：config.sdk_repo_url 缺失或不是 http(s) URL（控制台登记该仓远端地址，如 https://github.com/easemob/emclient-linux）`,
-    };
-  }
-  // 凭据纪律（§6.6/D11，key 按账号）：config.sdk_repo_account 是账号名；有账号名则
+  // 仓 URL / 主线 ref / 账号全部取自命中条目（多仓登记表 spec §4.3；env 四 key 已删除）
+  const sdkRepoUrl = selected.url;
+  // 凭据纪律（§6.6/D11，key 按账号）：条目 account 是账号名；有账号名则
   // 宽容读 git_account_{账号}_username/token 一对 secrets——两个都拿到才注入凭据，
-  // 缺一个记 warn 按无凭据继续（公开仓场景；不做「公开仓 = 无账号」限制）
-  const repoAccount = config.sdk_repo_account;
+  // 缺一个记 warn 按无凭据继续（公开仓场景）；无 account = 公开仓匿名
+  const repoAccount = selected.account;
   let gitCredentials: GitCredentials | undefined;
   if (repoAccount) {
     const username = trySecret(deps, `git_account_${repoAccount}_username`);
@@ -478,7 +570,7 @@ export async function runAnalysisFlow(
   // preparer 同款语义）：选中 ref 阶梯最终失败（含网络 fetch 失败）且选中的不是
   // 主线本身 → 回退 mainline_ref 重试一次，provenance 记回退说明、置信度 branch-head；
   // 选中的本来就是主线不自我重复，连主线也失败才 fail
-  const mainlineRef = config.mainline_ref ?? DEFAULT_MAINLINE_REF;
+  const mainlineRef = selected.mainline_ref;
   const prepareSource = (ref: string) =>
     prepareWorktree({
       repoUrl: sdkRepoUrl,
@@ -561,7 +653,7 @@ export async function runAnalysisFlow(
   const analyzed = await runAgentChainWithFallback(deps, {
     issueKey,
     label: "分析",
-    input: buildAnalysisAgentInput(issueKey),
+    input: buildAnalysisAgentInput(issueKey, selected),
     parse: parseAnalysisReport,
   });
   if (!analyzed.ok) {
@@ -611,10 +703,10 @@ export async function runAnalysisFlow(
   // 11. 组装输出（§6.10）→ 写去重记录 → return
   const url = `${jiraUrl.replace(/\/+$/, "")}/browse/${issueKey}`;
   const message = await buildAnalysisNotifyMessage(
-    { issueKey, url, report, audit, identity },
+    { issueKey, url, report, audit, identity, repoKey: selected.key },
     lookupWeComAccount,
   );
-  await store.markAnalyzed(issueKey, liveUpdated);
+  await store.markAnalyzed(issueKey, liveUpdated, selected.key);
   deps.log("info", "通知组装完成", {
     issueKey,
     mentions: message.mentions ?? [],
@@ -627,6 +719,7 @@ export async function runAnalysisFlow(
       ...message,
       issue_key: issueKey,
       url,
+      repo_key: selected.key,
       root_cause: report.root_cause,
       confidence: report.confidence,
       mainline_status: audit.status,
